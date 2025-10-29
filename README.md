@@ -497,7 +497,7 @@ SOFTWARE.
 
 For bugs, feature requests, or questions:
 
-- GitHub Issues: https://github.com/gauranga18/auto-backup-watch/issues
+- GitHub Issues: https://github.com/gauranga18/Auto-Backup-Watch/issues
 - Email: sauravjyotikalita56@gmail.com
 
 ---
