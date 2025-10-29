@@ -497,11 +497,11 @@ SOFTWARE.
 
 For bugs, feature requests, or questions:
 
-- GitHub Issues: https://github.com/yourusername/autobackupwatch/issues
-- Email: your.email@example.com
+- GitHub Issues: https://github.com/gauranga18/auto-backup-watch/issues
+- Email: sauravjyotikalita56@gmail.com
 
 ---
 
 **Version**: 1.0.0  
 **Last Updated**: October 2024  
-**Author**: [Your Name]
+**Author**: [Saurav]
