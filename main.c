@@ -4,7 +4,7 @@
  * Watches a directory and creates versioned backups when files change.
  * Uses SHA-256 hashing to detect actual content changes (not just timestamp).
  * 
- * Compile: gcc autobackup.c -o autobackup -lssl -lcrypto
+ * Compile: gcc main.c -o autobackup -lssl -lcrypto
  * Usage: ./autobackup <directory_to_watch> [poll_interval_seconds]
  * Example: ./autobackup ./my_project 5
  */
@@ -17,9 +17,9 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <errno.h>
-#include <openssl/sha.h>
+#include <openssl/evp.h>
 
-#define MAX_PATH 1024
+#define MAX_PATH 2048
 #define MAX_FILES 1000
 #define HASH_SIZE 65  // SHA-256 hex string + null terminator
 #define BACKUP_DIR ".autobackup"
@@ -51,7 +51,7 @@ void create_backup_dir();
 char* get_timestamp();
 void print_status();
 
-// Calculate SHA-256 hash of a file
+// Calculate SHA-256 hash of a file (Modern OpenSSL 3.0+ way)
 void calculate_sha256(const char *filepath, char *output_hash) {
     FILE *file = fopen(filepath, "rb");
     if (!file) {
@@ -59,25 +59,34 @@ void calculate_sha256(const char *filepath, char *output_hash) {
         return;
     }
 
-    SHA256_CTX sha256;
-    SHA256_Init(&sha256);
+    EVP_MD_CTX *mdctx = EVP_MD_CTX_new();
+    if (!mdctx) {
+        fclose(file);
+        output_hash[0] = '\0';
+        return;
+    }
+
+    EVP_DigestInit_ex(mdctx, EVP_sha256(), NULL);
 
     unsigned char buffer[8192];
     size_t bytes;
     
     while ((bytes = fread(buffer, 1, sizeof(buffer), file)) > 0) {
-        SHA256_Update(&sha256, buffer, bytes);
+        EVP_DigestUpdate(mdctx, buffer, bytes);
     }
 
-    unsigned char hash[SHA256_DIGEST_LENGTH];
-    SHA256_Final(hash, &sha256);
+    unsigned char hash[EVP_MAX_MD_SIZE];
+    unsigned int hash_len;
+    EVP_DigestFinal_ex(mdctx, hash, &hash_len);
+
+    EVP_MD_CTX_free(mdctx);
     fclose(file);
 
     // Convert to hex string
-    for (int i = 0; i < SHA256_DIGEST_LENGTH; i++) {
+    for (unsigned int i = 0; i < hash_len; i++) {
         sprintf(output_hash + (i * 2), "%02x", hash[i]);
     }
-    output_hash[64] = '\0';
+    output_hash[hash_len * 2] = '\0';
 }
 
 // Check if filename is a backup file (contains _v and timestamp)
@@ -124,16 +133,20 @@ void create_backup(const char *filepath, int version) {
     char *dot = strrchr(filename, '.');
     
     if (dot) {
-        strncpy(name, filename, dot - filename);
-        name[dot - filename] = '\0';
-        strcpy(ext, dot);
+        size_t name_len = dot - filename;
+        if (name_len >= MAX_PATH) name_len = MAX_PATH - 1;
+        strncpy(name, filename, name_len);
+        name[name_len] = '\0';
+        strncpy(ext, dot, MAX_PATH - 1);
+        ext[MAX_PATH - 1] = '\0';
     } else {
-        strcpy(name, filename);
+        strncpy(name, filename, MAX_PATH - 1);
+        name[MAX_PATH - 1] = '\0';
         ext[0] = '\0';
     }
     
     // Create backup filename: name_v1_backup_20240101_120000.ext
-    snprintf(backup_path, sizeof(backup_path), "%s/%s_v%d_backup_%s%s",
+    snprintf(backup_path, MAX_PATH - 1, "%s/%s_v%d_backup_%s%s",
              backup_directory, name, version, get_timestamp(), ext);
     
     // Copy file
@@ -176,7 +189,7 @@ void scan_directory() {
         }
         
         char filepath[MAX_PATH];
-        snprintf(filepath, sizeof(filepath), "%s/%s", watch_directory, entry->d_name);
+        snprintf(filepath, MAX_PATH - 1, "%s/%s", watch_directory, entry->d_name);
         
         struct stat file_stat;
         if (stat(filepath, &file_stat) != 0) {
@@ -194,7 +207,8 @@ void scan_directory() {
         
         // Add new file to tracking
         if (!found && file_count < MAX_FILES) {
-            strcpy(tracked_files[file_count].filename, entry->d_name);
+            strncpy(tracked_files[file_count].filename, entry->d_name, MAX_PATH - 1);
+            tracked_files[file_count].filename[MAX_PATH - 1] = '\0';
             calculate_sha256(filepath, tracked_files[file_count].hash);
             tracked_files[file_count].last_modified = file_stat.st_mtime;
             tracked_files[file_count].version = 1;
@@ -210,7 +224,7 @@ void scan_directory() {
 void check_for_changes() {
     for (int i = 0; i < file_count; i++) {
         char filepath[MAX_PATH];
-        snprintf(filepath, sizeof(filepath), "%s/%s", 
+        snprintf(filepath, MAX_PATH - 1, "%s/%s", 
                  watch_directory, tracked_files[i].filename);
         
         struct stat file_stat;
@@ -235,7 +249,8 @@ void check_for_changes() {
             create_backup(filepath, tracked_files[i].version);
             
             // Update tracking info
-            strcpy(tracked_files[i].hash, new_hash);
+            strncpy(tracked_files[i].hash, new_hash, HASH_SIZE - 1);
+            tracked_files[i].hash[HASH_SIZE - 1] = '\0';
             tracked_files[i].last_modified = file_stat.st_mtime;
             
             save_state();
@@ -246,7 +261,7 @@ void check_for_changes() {
 // Save tracking state to file
 void save_state() {
     char state_file[MAX_PATH];
-    snprintf(state_file, sizeof(state_file), "%s/.autobackup_state", watch_directory);
+    snprintf(state_file, MAX_PATH - 1, "%s/.autobackup_state", watch_directory);
     
     FILE *f = fopen(state_file, "w");
     if (!f) return;
@@ -266,20 +281,26 @@ void save_state() {
 // Load tracking state from file
 void load_state() {
     char state_file[MAX_PATH];
-    snprintf(state_file, sizeof(state_file), "%s/.autobackup_state", watch_directory);
+    snprintf(state_file, MAX_PATH - 1, "%s/.autobackup_state", watch_directory);
     
     FILE *f = fopen(state_file, "r");
     if (!f) return;
     
-    fscanf(f, "%d\n", &file_count);
-    for (int i = 0; i < file_count; i++) {
+    if (fscanf(f, "%d\n", &file_count) != 1) {
+        file_count = 0;
+        fclose(f);
+        return;
+    }
+    
+    for (int i = 0; i < file_count && i < MAX_FILES; i++) {
         long mtime;
-        fscanf(f, "%[^|]|%[^|]|%ld|%d\n",
+        if (fscanf(f, "%[^|]|%[^|]|%ld|%d\n",
                tracked_files[i].filename,
                tracked_files[i].hash,
                &mtime,
-               &tracked_files[i].version);
-        tracked_files[i].last_modified = (time_t)mtime;
+               &tracked_files[i].version) == 4) {
+            tracked_files[i].last_modified = (time_t)mtime;
+        }
     }
     
     fclose(f);
@@ -309,6 +330,7 @@ int main(int argc, char *argv[]) {
     
     // Get watch directory (remove trailing slash)
     strncpy(watch_directory, argv[1], MAX_PATH - 1);
+    watch_directory[MAX_PATH - 1] = '\0';
     size_t len = strlen(watch_directory);
     if (len > 0 && watch_directory[len - 1] == '/') {
         watch_directory[len - 1] = '\0';
@@ -326,7 +348,7 @@ int main(int argc, char *argv[]) {
     }
     
     // Setup backup directory
-    snprintf(backup_directory, sizeof(backup_directory), "%s/%s", 
+    snprintf(backup_directory, MAX_PATH - 1, "%s/%s", 
              watch_directory, BACKUP_DIR);
     create_backup_dir();
     
